@@ -1,0 +1,169 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Diagnostic Connectivity check gate
+    match /test/{documentId} {
+      allow read: if true;
+    }
+
+    // --- REUSABLE SECURITY PROSPECTS ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function getUserRole() {
+      return getUserData().role;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserRole() == 'admin';
+    }
+
+    function isPartner() {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserRole() == 'partner';
+    }
+
+    function isRestorer() {
+      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid)) && getUserRole() == 'restorer';
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // --- SYSTEM TYPE BLUEPRINTS ---
+    function isValidUser(data) {
+      return data.uid is string && data.uid.size() <= 128
+          && data.email is string && data.email.size() <= 256
+          && data.displayName is string && data.displayName.size() <= 256
+          && data.role is string && (data.role == 'user' || data.role == 'admin' || data.role == 'partner' || data.role == 'restorer');
+    }
+
+    function isValidOrder(data) {
+      return data.id is string && data.id.size() <= 128
+          && data.userId is string && data.userId.size() <= 128
+          && data.customerName is string && data.customerName.size() <= 256
+          && data.dateCreated is string && data.dateCreated.size() <= 64
+          && data.serviceType is string && data.serviceType.size() <= 256
+          && data.itemCount is number && data.itemCount >= 0
+          && data.deliveryStatus is string && data.deliveryStatus.size() <= 64
+          && data.restorationStage is string && data.restorationStage.size() <= 64
+          && data.otpVerified is bool;
+    }
+
+    // Checking optional parameters as string inside validation bounds
+    function isValidAppointment(data) {
+      return data.id is string && data.id.size() <= 128
+          && data.userId is string && data.userId.size() <= 128
+          && data.customerName is string && data.customerName.size() <= 256
+          && data.address is string && data.address.size() <= 1024
+          && data.city is string && data.city.size() <= 128
+          && data.scheduledDate is string && data.scheduledDate.size() <= 64
+          && data.timeSlot is string && data.timeSlot.size() <= 128
+          && data.status is string && data.status.size() <= 64;
+    }
+
+    function isValidFileItem(data) {
+      return data.id is string && data.id.size() <= 128
+          && data.name is string && data.name.size() <= 256
+          && data.type is string && (data.type == 'image' || data.type == 'video' || data.type == 'audio' || data.type == 'album')
+          && data.originalUrl is string && data.originalUrl.size() <= 2048
+          && data.restoredUrl is string && data.restoredUrl.size() <= 2048
+          && data.dateAdded is string && data.dateAdded.size() <= 64
+          && data.userId is string && data.userId.size() <= 128;
+    }
+
+    function isValidFamilyVault(data) {
+      return data.id is string && data.id.size() <= 128
+          && data.title is string && data.title.size() <= 256
+          && data.category is string && (data.category == 'wedding' || data.category == 'childhood' || data.category == 'heritage' || data.category == 'general')
+          && data.coverUrl is string && data.coverUrl.size() <= 2048
+          && data.createdDate is string && data.createdDate.size() <= 64
+          && data.ownerId is string && data.ownerId.size() <= 128;
+    }
+
+    function isValidNotification(data) {
+      return data.id is string && data.id.size() <= 128
+          && data.userId is string && data.userId.size() <= 128
+          && data.title is string && data.title.size() <= 256
+          && data.message is string && data.message.size() <= 1024
+          && data.type is string && data.type.size() <= 64
+          && data.date is string && data.date.size() <= 64
+          && data.isRead is bool;
+    }
+
+    // --- COLLECTION GATES ---
+
+    match /users/{userId} {
+      allow get: if isSignedIn() && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isSignedIn() && request.auth.uid == userId && incoming().role == 'user' && isValidUser(incoming());
+      allow update: if (isOwner(userId) && incoming().role == existing().role && incoming().uid == existing().uid && incoming().email == existing().email && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'profilePhoto', 'phone', 'city', 'address', 'vehicleType'])) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /orders/{orderId} {
+      allow get: if isSignedIn() && (isOwner(resource.data.userId) || isAdmin() || isPartner() || isRestorer());
+      allow list: if isSignedIn() && (isAdmin() || isPartner() || isRestorer() || resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && incoming().userId == request.auth.uid && isValidOrder(incoming());
+      allow update: if (isAdmin()) ||
+        (isOwner(existing().userId) && incoming().diff(existing()).affectedKeys().hasOnly(['rating']) && isValidOrder(incoming())) ||
+        (isPartner() && incoming().diff(existing()).affectedKeys().hasOnly(['deliveryStatus', 'eta', 'assignedPartnerId', 'pickupOtp', 'otpVerified', 'restorationStage']) && isValidOrder(incoming())) ||
+        (isRestorer() && incoming().diff(existing()).affectedKeys().hasOnly(['restorationStage']) && isValidOrder(incoming()));
+      allow delete: if isAdmin();
+    }
+
+    match /appointments/{appointmentId} {
+      allow get: if isSignedIn() && (isOwner(resource.data.userId) || isAdmin() || isPartner());
+      allow list: if isSignedIn() && (isAdmin() || isPartner() || resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && incoming().userId == request.auth.uid && isValidAppointment(incoming());
+      allow update: if (isAdmin()) || (isPartner() && incoming().diff(existing()).affectedKeys().hasOnly(['status']) && isValidAppointment(incoming()));
+      allow delete: if isAdmin();
+    }
+
+    match /files/{fileId} {
+      allow get: if isSignedIn() && (isOwner(resource.data.userId) || isAdmin() || isRestorer());
+      allow list: if isSignedIn() && (isAdmin() || isRestorer() || resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && (isAdmin() || isRestorer() || incoming().userId == request.auth.uid) && isValidFileItem(incoming());
+      allow delete: if isAdmin();
+    }
+
+    match /albums/{albumId} {
+      allow get: if isSignedIn() && (isOwner(resource.data.ownerId) || isAdmin() || (resource.data.sharedWith != null && resource.data.sharedWith.hasAny([request.auth.token.email])));
+      allow list: if isSignedIn() && (isAdmin() || resource.data.ownerId == request.auth.uid);
+      allow create: if isSignedIn() && incoming().ownerId == request.auth.uid && isValidFamilyVault(incoming());
+      allow update: if (isAdmin()) || (isOwner(existing().ownerId) && incoming().ownerId == existing().ownerId && incoming().diff(existing()).affectedKeys().hasOnly(['title', 'description', 'category', 'coverUrl', 'sharedWith']) && isValidFamilyVault(incoming()));
+      allow delete: if isOwner(resource.data.ownerId) || isAdmin();
+    }
+
+    match /notifications/{notifId} {
+      allow get: if isSignedIn() && (isOwner(resource.data.userId) || isAdmin());
+      allow list: if isSignedIn() && (isAdmin() || resource.data.userId == request.auth.uid);
+      allow create: if isSignedIn() && (incoming().userId == request.auth.uid || isAdmin() || isPartner() || isRestorer()) && isValidNotification(incoming());
+      allow update: if isSignedIn() && isOwner(existing().userId) && incoming().diff(existing()).affectedKeys().hasOnly(['isRead']) && isValidNotification(incoming());
+      allow delete: if isOwner(resource.data.userId) || isAdmin();
+    }
+  }
+}
